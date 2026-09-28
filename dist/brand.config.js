@@ -18,6 +18,6 @@ window.BRAND_CONFIG = {
   "assets": {
     "logo": "./assets/brand-logo.svg",
     "eventTitle": "./assets/event-title.svg",
-    "screenBackground": "url('./assets/screen-background.svg') center / cover no-repeat"
+    "screenBackground": "url('./assets/screen-background.png') center / cover no-repeat"
   }
 };
