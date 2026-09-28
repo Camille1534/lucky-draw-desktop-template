@@ -279,14 +279,18 @@ def state_payload(session_id: int) -> dict:
             (session_id,),
         ).fetchall()
         prizes = conn.execute("SELECT * FROM prizes WHERE session_id=? ORDER BY id", (session_id,)).fetchall()
-        pending = conn.execute(
-            "SELECT * FROM guests WHERE session_id=? AND status='pending' LIMIT 1", (session_id,)
-        ).fetchone()
+        # A draw can now hold several guests in the pending state.  Keep the
+        # legacy `pending` field below so an older screen still has a useful
+        # first winner to display, and expose the complete group separately.
+        pending_rows = conn.execute(
+            "SELECT * FROM guests WHERE session_id=? AND status='pending' ORDER BY name, guest_id", (session_id,)
+        ).fetchall()
         pending_prize = conn.execute("SELECT * FROM prizes WHERE id=?", (session.get("pending_prize_id"),)).fetchone() if session and session.get("pending_prize_id") else None
         return {
             "session": session,
             "guests": [guest_payload(row) for row in rows],
-            "pending": guest_payload(pending) if pending else None,
+            "pending": guest_payload(pending_rows[0]) if pending_rows else None,
+            "pending_guests": [guest_payload(row) for row in pending_rows],
             "pending_prize": row_dict(pending_prize),
             "records": [dict(r) for r in records],
             "prizes": [dict(r) for r in prizes],
@@ -659,8 +663,18 @@ class Handler(SimpleHTTPRequestHandler):
             if parsed.path == "/api/draw":
                 body = parse_json(self)
                 session_id = int(body.get("session_id", 1))
+                try:
+                    winner_count = int(body.get("winner_count", 1))
+                except (TypeError, ValueError):
+                    winner_count = 0
+                if winner_count < 1:
+                    return self.end_json({"ok": False, "error": "单次中奖人数至少为 1 人"}, HTTPStatus.BAD_REQUEST)
                 with DB_LOCK, connect() as conn:
-                    conn.execute("UPDATE guests SET status='eligible' WHERE session_id=? AND status='pending'", (session_id,))
+                    existing_pending = conn.execute(
+                        "SELECT 1 FROM guests WHERE session_id=? AND status='pending' LIMIT 1", (session_id,)
+                    ).fetchone()
+                    if existing_pending:
+                        return self.end_json({"ok": False, "error": "当前有一轮待确认的抽奖，请先确认、重抽或取消"}, HTTPStatus.BAD_REQUEST)
                     candidates = conn.execute("""SELECT * FROM guests WHERE session_id=? AND checked_in=1 AND status='eligible'""", (session_id,)).fetchall()
                     if not candidates:
                         return self.end_json({"ok": False, "error": "当前没有可抽奖的已签到嘉宾"}, HTTPStatus.BAD_REQUEST)
@@ -668,14 +682,25 @@ class Handler(SimpleHTTPRequestHandler):
                     prize = conn.execute("SELECT * FROM prizes WHERE id=? AND session_id=?", (prize_id, session_id)).fetchone() if prize_id else conn.execute("SELECT * FROM prizes WHERE session_id=? AND used_count < quantity ORDER BY id LIMIT 1", (session_id,)).fetchone()
                     if not prize or prize["used_count"] >= prize["quantity"]:
                         return self.end_json({"ok": False, "error": "请选择仍有库存的奖品"}, HTTPStatus.BAD_REQUEST)
-                    winner = random.SystemRandom().choice(candidates)
-                    conn.execute("UPDATE guests SET status='pending', updated_at=? WHERE guest_id=?", (now(), winner["guest_id"]))
+                    remaining = prize["quantity"] - prize["used_count"]
+                    allowed = min(len(candidates), remaining)
+                    if winner_count > allowed:
+                        return self.end_json(
+                            {"ok": False, "error": f"本次最多可抽 {allowed} 人（受已签到嘉宾和奖品库存限制）"},
+                            HTTPStatus.BAD_REQUEST,
+                        )
+                    winners = random.SystemRandom().sample(candidates, winner_count)
+                    stamp = now()
+                    conn.executemany(
+                        "UPDATE guests SET status='pending', updated_at=? WHERE guest_id=?",
+                        [(stamp, winner["guest_id"]) for winner in winners],
+                    )
                     conn.execute(
                         "UPDATE sessions SET pending_prize_id=?, draw_state='rolling' WHERE id=?",
                         (prize["id"], session_id),
                     )
                     conn.commit()
-                return self.end_json({"ok": True, "winner": guest_payload(winner), "prize": dict(prize)})
+                return self.end_json({"ok": True, "winner": guest_payload(winners[0]), "winners": [guest_payload(winner) for winner in winners], "prize": dict(prize)})
             if parsed.path == "/api/draw/pause":
                 # 停止大屏滚动并揭晓当前已选中的嘉宾；中奖记录仍要由后台另行确认。
                 body = parse_json(self)
@@ -703,25 +728,44 @@ class Handler(SimpleHTTPRequestHandler):
                 return self.end_json({"ok": True, "restored": restored})
             if parsed.path in ("/api/confirm", "/api/redraw"):
                 body = parse_json(self)
-                guest_id = str(body.get("guest_id"))
+                guest_id = str(body.get("guest_id") or "")
+                session_id = int(body.get("session_id", 1))
                 action = "confirmed" if parsed.path.endswith("confirm") else "redraw_excluded"
                 note = str(body.get("note", ""))
                 with DB_LOCK, connect() as conn:
-                    row = find_guest(conn, guest_id)
-                    if not row or row["status"] != "pending":
+                    if guest_id:
+                        rows = [find_guest(conn, guest_id)]
+                        rows = [row for row in rows if row and row["status"] == "pending"]
+                    else:
+                        rows = conn.execute(
+                            "SELECT * FROM guests WHERE session_id=? AND status='pending' ORDER BY name, guest_id", (session_id,)
+                        ).fetchall()
+                    if not rows:
                         return self.end_json({"ok": False, "error": "当前没有等待确认的嘉宾"}, HTTPStatus.BAD_REQUEST)
                     new_status = "confirmed_winner" if action == "confirmed" else "redraw_excluded"
-                    session_row = conn.execute("SELECT * FROM sessions WHERE id=?", (row["session_id"],)).fetchone()
+                    active_session_id = rows[0]["session_id"]
+                    session_row = conn.execute("SELECT * FROM sessions WHERE id=?", (active_session_id,)).fetchone()
                     prize_id = session_row["pending_prize_id"] if session_row else None
                     prize = conn.execute("SELECT * FROM prizes WHERE id=?", (prize_id,)).fetchone() if prize_id else None
                     prize_name = prize["name"] if prize else ""
-                    conn.execute("UPDATE guests SET status=?, updated_at=? WHERE guest_id=?", (new_status, now(), guest_id))
-                    conn.execute("INSERT INTO records(guest_id,session_id,action,note,prize_name,created_at) VALUES (?,?,?,?,?,?)", (guest_id, row["session_id"], action, note, prize_name, now()))
+                    stamp = now()
+                    conn.executemany(
+                        "UPDATE guests SET status=?, updated_at=? WHERE guest_id=?",
+                        [(new_status, stamp, row["guest_id"]) for row in rows],
+                    )
+                    conn.executemany(
+                        "INSERT INTO records(guest_id,session_id,action,note,prize_name,created_at) VALUES (?,?,?,?,?,?)",
+                        [(row["guest_id"], active_session_id, action, note, prize_name, stamp) for row in rows],
+                    )
                     if action == "confirmed" and prize:
-                        conn.execute("UPDATE prizes SET used_count=used_count+1 WHERE id=?", (prize_id,))
-                    conn.execute("UPDATE sessions SET pending_prize_id=NULL, draw_state='idle' WHERE id=?", (row["session_id"],))
+                        conn.execute("UPDATE prizes SET used_count=used_count+? WHERE id=?", (len(rows), prize_id))
+                    pending_left = conn.execute(
+                        "SELECT 1 FROM guests WHERE session_id=? AND status='pending' LIMIT 1", (active_session_id,)
+                    ).fetchone()
+                    if not pending_left:
+                        conn.execute("UPDATE sessions SET pending_prize_id=NULL, draw_state='idle' WHERE id=?", (active_session_id,))
                     conn.commit()
-                return self.end_json({"ok": True})
+                return self.end_json({"ok": True, "count": len(rows)})
             if parsed.path == "/api/reset":
                 with DB_LOCK, connect() as conn:
                     conn.execute("DELETE FROM records")
