@@ -26,6 +26,9 @@ let mainWindow = null;
 let localPort = null;
 let isQuitting = false;
 let quitGuard = null;
+const trace = (...args) => {
+  if (process.env.LUCKY_DRAW_TRACE === '1') console.error('[lucky-draw]', ...args);
+};
 // 主窗口成功显示过 = 应用已经真正跑起来了。只有在这之前才允许「GPU 挂了就换软件渲染
 // 重启一次」，避免现场运行中因为一次驱动抖动把正在用的大屏重启掉。
 let bootCompleted = false;
@@ -231,6 +234,7 @@ async function waitForServer(port) {
 }
 
 function createWindow(port) {
+  trace('creating main window', port);
   mainWindow = new BrowserWindow({
     width: 1440,
     height: 920,
@@ -265,11 +269,19 @@ function createWindow(port) {
   });
 
   mainWindow.once('ready-to-show', () => {
+    trace('main window ready to show');
     bootCompleted = true;
     mainWindow.show();
   });
+  mainWindow.webContents.on('did-fail-load', (_event, code, description, url) => {
+    trace('page failed to load', code, description, url);
+  });
+  mainWindow.webContents.on('render-process-gone', (_event, details) => {
+    trace('renderer process gone', details.reason, details.exitCode);
+  });
   mainWindow.loadURL(`http://127.0.0.1:${port}/?session=1`);
   mainWindow.on('closed', () => {
+    trace('main window closed');
     mainWindow = null;
     // 主窗口就是应用本体，关掉它等于结束使用。
     // 只靠 window-all-closed 的话，之前用 window.open 打开的大屏窗口还开着时
@@ -279,19 +291,27 @@ function createWindow(port) {
 }
 
 async function boot() {
+  trace('starting application');
   localPort = await resolveListenPort();
+  trace('using local port', localPort);
   startLocalServer(localPort);
   await waitForServer(localPort);
+  trace('local service ready');
   createWindow(localPort);
 }
 
 if (hasSingleInstanceLock) {
-  app.whenReady().then(() => boot().catch(error => {
+  app.whenReady().then(() => {
+    trace('Electron ready');
+    return boot();
+  }).catch(error => {
+    trace('application startup failed', error.message);
     dialog.showErrorBox('应用启动失败', error.message);
     app.quit();
-  }));
+  });
 
   app.on('before-quit', () => {
+    trace('before quit');
     isQuitting = true;
     stopLocalServer();
     // 兜底：万一还有别的东西挡着退出（同步对话框、没关掉的管道等），
@@ -302,6 +322,7 @@ if (hasSingleInstanceLock) {
   // before-quit 在某些路径下（例如 app.exit 之外被别处打断）不一定跑全，
   // will-quit 这里再收一次尾，确保服务进程不会漏。
   app.on('will-quit', () => {
+    trace('will quit');
     isQuitting = true;
     stopLocalServer();
     if (quitGuard) {
@@ -311,6 +332,7 @@ if (hasSingleInstanceLock) {
   });
 
   app.on('window-all-closed', () => {
+    trace('all windows closed');
     if (process.platform !== 'darwin') app.quit();
   });
 

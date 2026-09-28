@@ -3,6 +3,7 @@ node_modules/
 __pycache__/
 release/
 release-prev/
+release-*/
 
 # Platform-specific packaged runtimes and local test data
 runtime/
