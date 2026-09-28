@@ -1,0 +1,101 @@
+name: Publish desktop release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing version tag to publish
+        required: true
+        default: v1.0.0
+        type: string
+
+permissions:
+  contents: write
+
+env:
+  RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+
+jobs:
+  create-release:
+    name: Create or update prerelease
+    runs-on: ubuntu-latest
+    steps:
+      # 先创建 Release，随后各平台各自直接附加安装包；不使用 Actions Artifact 存储。
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          prerelease: true
+          generate_release_notes: true
+
+  windows:
+    needs: create-release
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: npm ci
+      - run: python -m pip install pyinstaller
+      - run: npm run stage:win-server
+      # electron-builder 只负责打包；下面直接将安装包附加到 GitHub Release。
+      - run: npx electron-builder --win nsis portable --x64 --publish never
+      # 发版前的闸门：拆开刚打好的包做冒烟验证（文件完整性 + 服务能起来 + 不留孤儿）。
+      # v1.0.5 就是因为「安装包里少了 runtime/lucky-draw-server.exe」而白发了一版。
+      - name: Verify packaged app
+        shell: bash
+        run: node tools/packaged-smoke/verify_packaged.js --app release/win-unpacked --mode both
+      - name: Attach Windows installers directly to the release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          prerelease: true
+          files: release/*.exe
+
+  macos:
+    needs: create-release
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-latest
+            arch: arm64
+          - runner: macos-15-intel
+            arch: x64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: npm ci
+      - run: python -m pip install pyinstaller
+      - run: npm run stage:mac-server
+      - run: npx electron-builder --mac dmg --${{ matrix.arch }} --publish never
+      - name: Verify packaged app
+        shell: bash
+        run: |
+          APP_PATH=$(find release -maxdepth 3 -name "*.app" -type d | head -1)
+          echo "Found app bundle: $APP_PATH"
+          node tools/packaged-smoke/verify_packaged.js --app "$APP_PATH" --mode both
+      - name: Attach macOS DMG directly to the release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          prerelease: true
+          files: release/*.dmg

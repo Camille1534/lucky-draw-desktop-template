@@ -1,0 +1,80 @@
+{
+  "name": "lucky-draw-template",
+  "version": "1.0.0",
+  "description": "活动抽奖系统 desktop lucky draw application",
+  "private": true,
+  "main": "main.cjs",
+  "scripts": {
+    "start": "electron .",
+    "pack": "electron-builder --dir",
+    "dist": "electron-builder --win nsis portable",
+    "stage:win-server": "python -m PyInstaller --onefile --name lucky-draw-server --distpath runtime --workpath .build/pyinstaller --specpath .build/pyinstaller server.py",
+    "stage:mac-server": "python3 -m PyInstaller --onefile --name lucky-draw-server --distpath runtime --workpath .build/pyinstaller --specpath .build/pyinstaller server.py",
+    "dist:mac": "npm run stage:mac-server && electron-builder --mac dmg --arm64",
+    "brand:apply": "node tools/apply-brand.cjs"
+  },
+  "devDependencies": {
+    "electron": "^44.4.2",
+    "electron-builder": "^26.15.3"
+  },
+  "build": {
+    "appId": "com.example.luckydraw",
+    "productName": "活动抽奖系统",
+    "asar": false,
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "main.cjs",
+      "package.json",
+      "server.py",
+      "build/icon.ico",
+      "dist/**/*",
+      "runtime/**/*",
+      "!runtime/python",
+      "!runtime/python/**",
+      "!runtime/python-full-backup",
+      "!runtime/python-full-backup/**",
+      "!runtime/_excluded",
+      "!runtime/_excluded/**"
+    ],
+    "win": {
+      "icon": "build/icon.ico",
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "活动抽奖系统"
+    },
+    "mac": {
+      "category": "public.app-category.business",
+      "artifactName": "${productName}-${version}-${arch}.${ext}",
+      "identity": "-",
+      "hardenedRuntime": false,
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64"
+          ]
+        }
+      ]
+    }
+  }
+}

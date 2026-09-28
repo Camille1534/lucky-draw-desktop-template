@@ -1,0 +1,23 @@
+# Dependencies and local build outputs
+node_modules/
+__pycache__/
+release/
+release-prev/
+
+# Platform-specific packaged runtimes and local test data
+runtime/
+runtime-test-data/
+data/
+templates/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+
+# Operating-system and tool files
+.DS_Store
+Thumbs.db
+npm-debug.log*
+.build/
+
+# Scratch directories used during development
+.tmp_*/

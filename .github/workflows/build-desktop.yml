@@ -1,0 +1,66 @@
+name: Build desktop apps
+
+# 平时推 main 就把 Windows + macOS 两个平台都跑一遍，并执行打包冒烟验证。
+# 这样「装机版缺件 / 起不来 / 留孤儿进程」这类问题会在合并后立刻暴露，
+# 而不是等到打完标签、发完 Release 才被用户发现（v1.0.5 的教训）。
+# 日常构建不保存安装包 Artifact，避免占用私有仓库 Actions 存储；
+# 只有推送 v* 标签才会真正发布，见 release.yml。
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths-ignore:
+      - "README.md"
+
+jobs:
+  windows:
+    name: Windows (x64)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: npm ci
+      - run: python -m pip install pyinstaller
+      - run: npm run stage:win-server
+      - run: npx electron-builder --win nsis portable --x64 --publish never
+      - name: Verify packaged app
+        shell: bash
+        run: node tools/packaged-smoke/verify_packaged.js --app release/win-unpacked --mode both
+
+  macos:
+    name: macOS (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-latest
+            arch: arm64
+          - runner: macos-15-intel
+            arch: x64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: npm ci
+      - run: python -m pip install pyinstaller
+      - run: npm run stage:mac-server
+      - run: npx electron-builder --mac dmg --${{ matrix.arch }} --publish never
+      - name: Verify packaged app
+        shell: bash
+        run: |
+          APP_PATH=$(find release -maxdepth 3 -name "*.app" -type d | head -1)
+          echo "Found app bundle: $APP_PATH"
+          node tools/packaged-smoke/verify_packaged.js --app "$APP_PATH" --mode both
