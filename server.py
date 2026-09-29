@@ -653,6 +653,33 @@ class Handler(SimpleHTTPRequestHandler):
                     conn.execute("UPDATE prizes SET name=?, quantity=? WHERE id=?", (name, quantity, prize_id))
                     conn.commit()
                 return self.end_json({"ok": True})
+            if parsed.path == "/api/prize/reset-used":
+                # 测试用：把奖品的已发出数量归零，并把本奖品对应的已中奖嘉宾恢复为可抽奖。
+                # 中奖记录不删除，方便测试后仍能追溯历史操作。
+                body = parse_json(self)
+                try:
+                    prize_id = int(body.get("prize_id"))
+                except (TypeError, ValueError):
+                    return self.end_json({"ok": False, "error": "奖品参数无效"}, HTTPStatus.BAD_REQUEST)
+                with DB_LOCK, connect() as conn:
+                    prize = conn.execute("SELECT * FROM prizes WHERE id=?", (prize_id,)).fetchone()
+                    if not prize:
+                        return self.end_json({"ok": False, "error": "找不到该奖品"}, HTTPStatus.NOT_FOUND)
+                    if conn.execute("SELECT 1 FROM sessions WHERE pending_prize_id=?", (prize_id,)).fetchone():
+                        return self.end_json({"ok": False, "error": "该奖品正在进行中的抽奖中，请先结束本轮再重置"}, HTTPStatus.BAD_REQUEST)
+                    stamp = now()
+                    restored = conn.execute(
+                        """UPDATE guests SET status='eligible', updated_at=?
+                           WHERE session_id=? AND status='confirmed_winner'
+                             AND guest_id IN (
+                               SELECT guest_id FROM records
+                                WHERE session_id=? AND action='confirmed' AND prize_name=?
+                             )""",
+                        (stamp, prize["session_id"], prize["session_id"], prize["name"]),
+                    ).rowcount
+                    conn.execute("UPDATE prizes SET used_count=0 WHERE id=?", (prize_id,))
+                    conn.commit()
+                return self.end_json({"ok": True, "restored": restored})
             if parsed.path == "/api/records/clear":
                 body = parse_json(self)
                 session_id = int(body.get("session_id", 1))
