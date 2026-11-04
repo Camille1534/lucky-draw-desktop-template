@@ -4,6 +4,7 @@ const { spawn, spawnSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const net = require('net');
+const updateToken = require('crypto').randomBytes(32).toString('hex');
 
 app.setName(packageInfo.build?.productName || '活动抽奖系统');
 
@@ -152,7 +153,7 @@ function resolveListenPort() {
 function startLocalServer(port) {
   const root = appRoot();
   const launch = serverLaunch(root);
-  const dataDir = path.join(app.getPath('userData'), 'data');
+  const dataDir = process.env.LUCKY_DRAW_DATA_DIR || path.join(app.getPath('userData'), 'data');
   fs.mkdirSync(dataDir, { recursive: true });
 
   if (launch.missing) {
@@ -172,6 +173,7 @@ function startLocalServer(port) {
       LUCKY_DRAW_PORT: String(port),
       LUCKY_DRAW_DIST_DIR: path.join(root, 'dist'),
       LUCKY_DRAW_DATA_DIR: dataDir,
+      LUCKY_DRAW_UPDATE_TOKEN: updateToken,
       // 把自己的 PID 告诉服务端，让它能直接监视「应用主进程」而不是只盯着
       // 中间那层 PyInstaller bootloader。见 server.py 的 watch_parent_process()：
       // macOS/Linux 上主进程被 kill -9 时 bootloader 不会跟着死，只靠 getppid()
@@ -245,6 +247,7 @@ function createWindow(port) {
     icon: path.join(appRoot(), 'build', 'icon.ico'),
     autoHideMenuBar: true,
     webPreferences: {
+      preload: path.join(appRoot(), 'preload.cjs'),
       contextIsolation: true,
       nodeIntegration: false,
       devTools: !app.isPackaged
@@ -298,6 +301,7 @@ async function boot() {
   await waitForServer(localPort);
   trace('local service ready');
   createWindow(localPort);
+  require('./updates.cjs').registerUpdates(() => mainWindow, () => localPort, updateToken);
 }
 
 if (hasSingleInstanceLock) {

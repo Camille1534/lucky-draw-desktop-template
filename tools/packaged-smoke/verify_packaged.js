@@ -188,7 +188,9 @@ function listPidsByImage(imageName) {
       });
       for (const line of (out.stdout || '').split('\n')) {
         const m = line.match(/"([^"]+)"\s*,\s*"(\d+)"/);
-        if (m && m[1].toLowerCase() === imageName.toLowerCase()) pids.add(Number(m[2]));
+        // tasklist already filters the exact image name. Its localized output
+        // may be GBK rather than UTF-8, so only parse the ASCII PID here.
+        if (m) pids.add(Number(m[2]));
       }
     } else {
       const out = spawnSync('ps', ['-Ao', 'pid=,comm='], { encoding: 'utf8', timeout: 15000 });
@@ -391,7 +393,7 @@ async function checkApp(appPath, opts) {
   // （把 GPU 线程并进浏览器进程）。用 --no-app-args 可以不附加任何开关，
   // 那时应用会走自己的「GPU 自愈重启」路径，脚本会自动接管重启后的新实例。
   const appImage = path.basename(exe);
-  const appArgs = opts.noAppArgs ? [] : ['--in-process-gpu'];
+  const appArgs = [...(opts.noAppArgs ? [] : ['--in-process-gpu']), `--user-data-dir=${dataDir}`];
   info('app', `启动 ${exe}${appArgs.length ? `（${appArgs.join(' ')}）` : ''}`);
   const child = spawn(exe, appArgs, {
     cwd: path.dirname(exe),

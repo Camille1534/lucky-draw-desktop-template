@@ -8,7 +8,7 @@ on:
       tag:
         description: Existing version tag to publish
         required: true
-        default: v1.0.0
+        default: v1.1.0
         type: string
 
 permissions:
@@ -19,7 +19,7 @@ env:
 
 jobs:
   create-release:
-    name: Create or update prerelease
+    name: Prepare release draft
     runs-on: ubuntu-latest
     steps:
       # 先创建 Release，随后各平台各自直接附加安装包；不使用 Actions Artifact 存储。
@@ -27,7 +27,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.RELEASE_TAG }}
-          prerelease: true
+          draft: true
           generate_release_notes: true
 
   windows:
@@ -45,6 +45,7 @@ jobs:
         with:
           python-version: "3.12"
       - run: npm ci
+      - run: python tools/test_events.py
       - run: python -m pip install pyinstaller
       - run: npm run stage:win-server
       # electron-builder 只负责打包；下面直接将安装包附加到 GitHub Release。
@@ -58,8 +59,12 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.RELEASE_TAG }}
-          prerelease: true
-          files: release/*.exe
+          draft: true
+          fail_on_unmatched_files: true
+          files: |
+            release/*.exe
+            release/*.blockmap
+            release/latest.yml
 
   macos:
     needs: create-release
@@ -97,5 +102,18 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.RELEASE_TAG }}
-          prerelease: true
+          draft: true
+          fail_on_unmatched_files: true
           files: release/*.dmg
+
+  publish:
+    needs: [windows, macos]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Publish complete stable release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          draft: false
+          prerelease: false
+          make_latest: true

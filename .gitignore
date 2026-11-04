@@ -22,3 +22,5 @@ npm-debug.log*
 
 # Scratch directories used during development
 .tmp_*/
+output/playwright/
+.playwright-cli/

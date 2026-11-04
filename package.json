@@ -1,6 +1,6 @@
 {
   "name": "lucky-draw-template",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "活动抽奖系统 desktop lucky draw application",
   "private": true,
   "main": "main.cjs",
@@ -26,6 +26,9 @@
     },
     "files": [
       "main.cjs",
+      "preload.cjs",
+      "updates.cjs",
+      "event_store.py",
       "package.json",
       "server.py",
       "build/icon.ico",
@@ -39,6 +42,13 @@
       "!runtime/_excluded/**"
     ],
     "win": {
+      "publish": [
+        {
+          "provider": "github",
+          "owner": "Camille1534",
+          "repo": "lucky-draw-desktop-template"
+        }
+      ],
       "icon": "build/icon.ico",
       "target": [
         {
@@ -56,6 +66,7 @@
       ]
     },
     "nsis": {
+      "artifactName": "Lucky-Draw-Setup-${version}-${arch}.${ext}",
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
@@ -76,5 +87,8 @@
         }
       ]
     }
+  },
+  "dependencies": {
+    "electron-updater": "6.6.2"
   }
 }

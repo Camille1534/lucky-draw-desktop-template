@@ -244,5 +244,4 @@ function logout(){const t=token;token='';
 try{localStorage.removeItem('lucky-draw-admin-token')}catch(_){}
 try{fetch('/api/logout',{method:'POST',headers:{'Content-Type':'application/json','X-Admin-Token':t||''},body:'{}'})}catch(_){}
 renderLogin()}
-boot();
-</script></body></html>
+</script><script src="./events.js"></script></body></html>

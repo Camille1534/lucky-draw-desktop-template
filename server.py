@@ -18,6 +18,7 @@ from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from xml.etree import ElementTree as ET
+from event_store import EventStore
 
 # Python 的 mimetypes 在 Windows 上不认字体后缀，不注册会以
 # application/octet-stream 返回 woff2，Chromium 会拒绝加载本地字体。
@@ -37,6 +38,8 @@ DB_PATH = DATA / "lucky-draw.sqlite"
 DB_LOCK = threading.RLock()
 ADMIN_PASSWORD = os.environ.get("LUCKY_DRAW_ADMIN_PASSWORD", "admin123")
 AUTH_TOKENS: set[str] = set()
+EVENTS = EventStore(DATA)
+UPDATE_INSTALLING = False
 
 # 模板不内置真实嘉宾。现场从后台导入名单或手动添加即可。
 SEED_GUESTS: list[tuple[str, str, str, str, int]] = []
@@ -287,6 +290,7 @@ def state_payload(session_id: int) -> dict:
         ).fetchall()
         pending_prize = conn.execute("SELECT * FROM prizes WHERE id=?", (session.get("pending_prize_id"),)).fetchone() if session and session.get("pending_prize_id") else None
         return {
+            "event": EVENTS.public(),
             "session": session,
             "guests": [guest_payload(row) for row in rows],
             "pending": guest_payload(pending_rows[0]) if pending_rows else None,
@@ -431,6 +435,39 @@ class Handler(SimpleHTTPRequestHandler):
         return self.headers.get("X-Admin-Token", "") in AUTH_TOKENS
 
     def do_GET(self):
+        # Switching the active database and API reads/writes share one lock.
+        # A request must never cross event boundaries halfway through.
+        if self.path.startswith('/api/'):
+            with DB_LOCK:
+                return self.event_get()
+        return super().do_GET()
+
+    def event_get(self):
+        parsed = urllib.parse.urlparse(self.path)
+        if parsed.path == '/api/events':
+            if not self.authorized():
+                return self.end_json({'ok': False, 'error': '请先登录后台'}, 401)
+            return self.end_json({'events': EVENTS.list(), 'active': EVENTS.public()})
+        if parsed.path == '/api/event-asset':
+            query = urllib.parse.parse_qs(parsed.query)
+            try:
+                kind = query.get('kind', [''])[0]
+                if kind not in ('logo', 'background'):
+                    raise ValueError('图片不存在')
+                value = EVENTS.get(query.get('id', [''])[0]).get(kind, '')
+                header, encoded = value.split(',', 1)
+                raw = base64.b64decode(encoded)
+            except (ValueError, KeyError):
+                return self.end_json({'ok': False, 'error': '图片不存在'}, 404)
+            self.send_response(200)
+            self.send_header('Content-Type', header[5:].split(';')[0])
+            self.send_header('Content-Length', str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+            return
+        return self.legacy_get()
+
+    def legacy_get(self):
         parsed = urllib.parse.urlparse(self.path)
         if parsed.path == "/api/state":
             query = urllib.parse.parse_qs(parsed.query)
@@ -466,6 +503,65 @@ class Handler(SimpleHTTPRequestHandler):
         return super().do_GET()
 
     def do_POST(self):
+        global DB_PATH, UPDATE_INSTALLING
+        with DB_LOCK:
+            route = urllib.parse.urlparse(self.path).path
+            if route == '/api/updates/prepare':
+                expected = os.environ.get('LUCKY_DRAW_UPDATE_TOKEN')
+                if not expected or self.headers.get('X-Update-Token') != expected:
+                    return self.end_json({'ok': False, 'error': '无效的更新请求'}, 403)
+                with connect() as conn:
+                    if conn.execute("SELECT 1 FROM guests WHERE status='pending'").fetchone():
+                        return self.end_json({'ok': False, 'error': '请先确认或取消本轮抽奖，再安装更新'}, 409)
+                UPDATE_INSTALLING = True
+                return self.end_json({'ok': True})
+            if UPDATE_INSTALLING:
+                return self.end_json({'ok': False, 'error': '正在准备安装更新，请稍候'}, 409)
+            if route in ('/api/login', '/api/logout'):
+                return self.legacy_post()
+            if not self.authorized():
+                return self.end_json({'ok': False, 'error': '请先登录后台'}, 401)
+            if self.headers.get('X-Event-Id') != EVENTS.active():
+                return self.end_json({'ok': False, 'error': '活动已切换，请刷新后重试'}, 409)
+            if route.startswith('/api/events/'):
+                try:
+                    if int(self.headers.get('Content-Length', '0')) > 12_000_000:
+                        raise ValueError('配置文件太大')
+                    body = parse_json(self)
+                    with connect() as conn:
+                        if conn.execute("SELECT 1 FROM guests WHERE status='pending'").fetchone():
+                            raise ValueError('请先确认或取消正在进行的抽奖，再修改或切换活动')
+                    if route == '/api/events/create':
+                        event_id = EVENTS.save(body, create=True)
+                        original = DB_PATH
+                        try:
+                            DB_PATH = EVENTS.database(event_id)
+                            init_db()
+                        finally:
+                            DB_PATH = original
+                    elif route == '/api/events/update':
+                        if body.get('id') != EVENTS.active():
+                            raise ValueError('请先切换到要修改的活动')
+                        event_id = EVENTS.save(body)
+                    elif route == '/api/events/switch':
+                        event_id = str(body.get('id', ''))
+                        target = EVENTS.database(event_id)
+                        original = DB_PATH
+                        try:
+                            DB_PATH = target
+                            init_db()
+                            EVENTS.select(event_id)
+                        except Exception:
+                            DB_PATH = original
+                            raise
+                    else:
+                        return self.end_json({'ok': False, 'error': 'Not found'}, 404)
+                    return self.end_json({'ok': True, 'id': event_id})
+                except (ValueError, sqlite3.Error) as exc:
+                    return self.end_json({'ok': False, 'error': str(exc)}, 400)
+            return self.legacy_post()
+
+    def legacy_post(self):
         parsed = urllib.parse.urlparse(self.path)
         try:
             if parsed.path == "/api/login":
@@ -902,6 +998,7 @@ def watch_parent_process() -> None:
 
 
 if __name__ == "__main__":
+    DB_PATH = EVENTS.database(EVENTS.active())
     init_db()
     # 守护线程：父进程没了就一起走，避免留下占着端口和 SQLite 的孤儿进程。
     threading.Thread(target=watch_parent_process, daemon=True).start()

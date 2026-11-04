@@ -2,7 +2,7 @@
   "packageName": "lucky-draw-template",
   "appName": "活动抽奖系统",
   "appId": "com.example.luckydraw",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "eventName": "品牌活动",
   "eventMeta": "现场抽奖 · 年份待设置",
   "screenTagline": "欢迎参与现场抽奖",
